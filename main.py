@@ -7,18 +7,15 @@ from binance_api_client import BinanceClient
 from rich.console import Console
 from rich.table import Table
 from rich.progress import track
+from config import conversion_rates, currency_symbols
 
-console = Console(width=120)
+from plot_visualization import plot_symbol_history
+
+console = Console(width=200)
 
 # Глобальный словарь валютных курсов относительно 1 USD.
 # Изначально можно задать примерные значения, они будут обновлены с Binance.
-conversion_rates = {
-    "USD": 1.0,
-    "RUB": 60.0,
-    "EUR": 0.95,
-    "GBP": 0.82,
-    "JPY": 130.0,
-}
+
 
 # Словарь с именами активов для отображения (при просмотре деталей)
 asset_names = {
@@ -170,15 +167,13 @@ def export_analysis(analysis: dict, filename: str):
 
 def view_portfolio():
     """
-    Перед выводом портфеля автоматически обновляет курсы обмена.
-    Выводит текущий портфель с информацией:
+    Обновляет курсы обмена, затем выводит портфель с информацией:
       - Символ, название, количество
-      - Текущая цена (USD)
-      - Стоимость актива в USD и по другим валютам (согласно conversion_rates)
-      - В конце таблицы добавляется строка с общей стоимостью портфеля по каждой валюте.
-    При этом для столбцов с длинными заголовками разрешается перенос текста.
+      - Текущая цена (USD) с форматированием: "USD: <price> <symbol>"
+      - Стоимость актива в USD и по другим валютам с аналогичным форматированием.
+      - В конце выводится строка с общей стоимостью портфеля по каждой валюте.
     """
-    # Обновляем курсы обмена перед просмотром портфеля
+    from main import update_all_fiat_rates_from_binance  # Функция обновления курсов
     update_all_fiat_rates_from_binance()
 
     session = Session()
@@ -200,7 +195,6 @@ def view_portfolio():
     for curr in conversion_rates:
         if curr != "USD":
             col_name = f"Стоимость ({curr})"
-            # Разрешаем перенос, чтобы весь заголовок был виден
             table.add_column(col_name, justify="right", no_wrap=False, overflow="fold")
             additional_currency_columns.append(curr)
 
@@ -220,25 +214,31 @@ def view_portfolio():
             rate = conversion_rates[curr]
             cost = value_usd * rate
             totals[curr] += cost
-            cost_values.append(f"{cost:,.2f}")
+            cost_values.append(f"{curr}: {cost:,.2f} {currency_symbols.get(curr, curr)}")
 
         table.add_row(
             asset.symbol,
             asset.name or "N/A",
             str(asset.amount),
-            f"{price_usd:,.2f}",
-            f"{value_usd:,.2f}",
+            f"USD: {price_usd:,.2f} {currency_symbols['USD']}",
+            f"USD: {value_usd:,.2f} {currency_symbols['USD']}",
             *cost_values
         )
 
-    total_row = ["[bold]Итого[/bold]", "", "", "", f"[bold]{totals['USD']:,.2f}[/bold]"]
+    total_row = [
+        "[bold]Итого[/bold]",
+        "",
+        "",
+        "",
+        f"[bold]USD: {totals['USD']:,.2f} {currency_symbols['USD']}[/bold]"
+    ]
     for curr in additional_currency_columns:
-        total_row.append(f"[bold]{totals[curr]:,.2f}[/bold]")
+        total_row.append(f"[bold]{curr}: {totals[curr]:,.2f} {currency_symbols.get(curr, curr)}[/bold]")
     table.add_row(*total_row)
 
     console.print(table)
     session.close()
-1
+
 
 def add_asset():
     session = Session()
@@ -385,41 +385,49 @@ def edit_asset_names():
 
 def interactive_portfolio_management():
     while True:
-        console.print("\n[bold blue]Портфельное управление:[/bold blue]")
-        console.print("[cyan]1.[/cyan] Просмотр портфеля с информацией о стоимости")
-        console.print("[cyan]2.[/cyan] Добавить актив")
-        console.print("[cyan]3.[/cyan] Обновить актив")
-        console.print("[cyan]4.[/cyan] Удалить актив")
-        console.print("[cyan]5.[/cyan] Просмотр всех доступных активов (биржа)")
-        console.print("[cyan]6.[/cyan] Просмотр детальной информации по активу (Биржа)")
-        console.print("[cyan]7.[/cyan] Обновить курсы обмена с Binance")
-        console.print("[cyan]8.[/cyan] Просмотр всех курсов обмена")
-        console.print("[cyan]9.[/cyan] Редактировать список названий активов")
-        console.print("[cyan]10.[/cyan] Выход")
-        choice = input("Выберите опцию: ").strip()
-        if choice == "1":
-            view_portfolio()
-        elif choice == "2":
-            add_asset()
-        elif choice == "3":
-            update_asset()
-        elif choice == "4":
-            remove_asset()
-        elif choice == "5":
-            view_all_exchange_assets()
-        elif choice == "6":
-            view_asset_details()
-        elif choice == "7":
-            update_all_fiat_rates_from_binance()
-        elif choice == "8":
-            view_exchange_rates()
-        elif choice == "9":
-            edit_asset_names()
-        elif choice == "10":
-            console.print("[bold green]Выход из управления портфелем.[/bold green]")
+        try:
+            console.print("\n[bold blue]Портфельное управление:[/bold blue]")
+            console.print("[cyan]1.[/cyan] Просмотр портфеля с информацией о стоимости")
+            console.print("[cyan]2.[/cyan] Добавить актив")
+            console.print("[cyan]3.[/cyan] Обновить актив")
+            console.print("[cyan]4.[/cyan] Удалить актив")
+            console.print("[cyan]5.[/cyan] Просмотр всех доступных активов (биржа)")
+            console.print("[cyan]6.[/cyan] Просмотр детальной информации по активу (Биржа)")
+            console.print("[cyan]7.[/cyan] Обновить курсы обмена с Binance")
+            console.print("[cyan]8.[/cyan] Просмотр всех курсов обмена")
+            console.print("[cyan]9.[/cyan] Редактировать список названий активов")
+            console.print("[cyan]10.[/cyan] Визуализировать историю изменения цены для символа")
+            console.print("[cyan]11.[/cyan] Выход")
+            choice = input("Выберите опцию: ").strip()
+            if choice == "1":
+                view_portfolio()
+            elif choice == "2":
+                add_asset()
+            elif choice == "3":
+                update_asset()
+            elif choice == "4":
+                remove_asset()
+            elif choice == "5":
+                view_all_exchange_assets()
+            elif choice == "6":
+                view_asset_details()
+            elif choice == "7":
+                update_all_fiat_rates_from_binance()
+            elif choice == "8":
+                view_exchange_rates()
+            elif choice == "9":
+                edit_asset_names()
+            elif choice == "10":
+                symbol = input("Введите символ актива для визуализации (например, BTCUSDT): ").strip().upper()
+                plot_symbol_history(symbol)
+            elif choice == "11":
+                console.print("[bold green]Выход из управления портфелем.[/bold green]")
+                break
+            else:
+                console.print("[red]Неверный выбор. Попробуйте снова.[/red]")
+        except KeyboardInterrupt:
+            console.print("\n[bold red]Программа прервана пользователем. Выход...[/bold red]")
             break
-        else:
-            console.print("[red]Неверный выбор. Попробуйте снова.[/red]")
 
 
 def main():
@@ -436,4 +444,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        console.print("\n[bold red]Программа прервана пользователем. Выход...[/bold red]")
+
