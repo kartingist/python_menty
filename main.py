@@ -1,21 +1,19 @@
 # main.py
 import csv
 import os
-from models import Session, Kline, Asset
+from models import Session, Kline, Asset, Portfolio  # Обновленный импорт
 from schemas import KlineData
 from binance_api_client import BinanceClient
 from rich.console import Console
 from rich.table import Table
 from rich.progress import track
 from config import conversion_rates, currency_symbols
-
 from plot_visualization import plot_symbol_history
 
 console = Console(width=200)
 
-# Глобальный словарь валютных курсов относительно 1 USD.
+# Глобальный словарь валютных курсов относительно 1 USD
 # Изначально можно задать примерные значения, они будут обновлены с Binance.
-
 
 # Словарь с именами активов для отображения (при просмотре деталей)
 asset_names = {
@@ -28,13 +26,48 @@ asset_names = {
 }
 
 
+class PortfolioManager:
+    def __init__(self):
+        self.session = Session()
+        self.current_portfolio = None
+
+    def select_portfolio(self):
+        """Выбор или создание портфеля по названию."""
+        while True:
+            portfolio_name = input("Введите название портфеля (логин): ").strip()
+            if not portfolio_name:
+                console.print("[red]Название портфеля не может быть пустым.[/red]")
+                continue
+
+            portfolio = self.session.query(Portfolio).filter_by(name=portfolio_name).first()
+            if portfolio:
+                self.current_portfolio = portfolio
+                console.print(f"[green]Выбран портфель: {portfolio_name}[/green]")
+                break
+            else:
+                create_new = input(f"Портфель '{portfolio_name}' не найден. Создать новый? (y/n): ").strip().lower()
+                if create_new == 'y':
+                    new_portfolio = Portfolio(name=portfolio_name)
+                    self.session.add(new_portfolio)
+                    self.session.commit()
+                    self.current_portfolio = new_portfolio
+                    console.print(f"[green]Создан и выбран новый портфель: {portfolio_name}[/green]")
+                    break
+                else:
+                    console.print("[yellow]Пожалуйста, выберите существующий портфель или создайте новый.[/yellow]")
+
+    def get_current_portfolio_id(self):
+        """Возвращает ID текущего портфеля."""
+        if not self.current_portfolio:
+            raise ValueError("Портфель не выбран!")
+        return self.current_portfolio.id
+
+    def close(self):
+        """Закрытие сессии."""
+        self.session.close()
+
+
 def get_fiat_rate(fiat: str) -> float:
-    """
-    Получает актуальный курс для заданной валюты (например, RUB) с Binance.
-    Сначала пытается получить тикер по символу "USDT{fiat}".
-    Если не найден, пытается по символу "{fiat}USDT" и возвращает инвертированное значение.
-    Если не удаётся получить данные – возвращает None.
-    """
     client = BinanceClient()
     symbol1 = "USDT" + fiat
     data1 = client._send_request("GET", "/api/v3/ticker/price", params={"symbol": symbol1})
@@ -49,7 +82,6 @@ def get_fiat_rate(fiat: str) -> float:
     if "price" in data2:
         try:
             rate = float(data2["price"])
-            # Если получен курс вида: 1 FIAT = rate USDT, то 1 USDT = 1/rate FIAT
             return 1 / rate if rate != 0 else None
         except Exception:
             pass
@@ -57,10 +89,6 @@ def get_fiat_rate(fiat: str) -> float:
 
 
 def update_all_fiat_rates_from_binance():
-    """
-    Обновляет курсы обмена для всех валют (кроме USD) на основе данных с Binance.
-    Обновлённые курсы сохраняются в глобальном словаре conversion_rates.
-    """
     global conversion_rates
     for fiat in conversion_rates:
         if fiat == "USD":
@@ -74,10 +102,6 @@ def update_all_fiat_rates_from_binance():
 
 
 def view_exchange_rates():
-    """
-    Автоматически обновляет курсы обмена с Binance и выводит таблицу,
-    где указано: 1 USD = ? единиц соответствующей валюты.
-    """
     update_all_fiat_rates_from_binance()
     table = Table(title="Курсы обмена (1 USD = ?)")
     table.add_column("Валюта", style="cyan", justify="center")
@@ -89,7 +113,7 @@ def view_exchange_rates():
 
 def fetch_and_store_klines(symbol: str, interval: str, limit: int = 500):
     console.print(f"[bold blue]Запрос исторических данных для {symbol} с интервалом {interval}...[/bold blue]")
-    client = BinanceClient()  # Публичный клиент – API ключ не требуется
+    client = BinanceClient()
     raw_data = client.get_klines(symbol, interval, limit=limit)
 
     session = Session()
@@ -165,47 +189,33 @@ def export_analysis(analysis: dict, filename: str):
 
 # ------------- Функции для управления портфелем -------------
 
-def view_portfolio():
-    """
-    Обновляет курсы обмена, затем выводит портфель с информацией:
-      - Символ, название, количество
-      - Текущая цена (USD) с форматированием: "USD: <price> <symbol>"
-      - Стоимость актива в USD и по другим валютам с аналогичным форматированием.
-      - В конце выводится строка с общей стоимостью портфеля по каждой валюте.
-    """
-    from main import update_all_fiat_rates_from_binance  # Функция обновления курсов
+def view_portfolio(manager: PortfolioManager):
     update_all_fiat_rates_from_binance()
-
     session = Session()
-    assets = session.query(Asset).all()
+    portfolio_id = manager.get_current_portfolio_id()
+    assets = session.query(Asset).filter_by(portfolio_id=portfolio_id).all()
     if not assets:
-        console.print("[yellow]Портфель пуст.[/yellow]")
+        console.print(f"[yellow]Портфель '{manager.current_portfolio.name}' пуст.[/yellow]")
         session.close()
         return
 
     client = BinanceClient()
-    table = Table(title="Портфель", expand=True)
+    table = Table(title=f"Портфель: {manager.current_portfolio.name}", expand=True)
     table.add_column("Символ", style="cyan", no_wrap=True)
     table.add_column("Название", style="magenta", no_wrap=False)
     table.add_column("Количество", style="green", justify="right", no_wrap=True)
     table.add_column("Цена (USD)", justify="right", no_wrap=True)
     table.add_column("Стоимость (USD)", justify="right", no_wrap=True)
 
-    additional_currency_columns = []
-    for curr in conversion_rates:
-        if curr != "USD":
-            col_name = f"Стоимость ({curr})"
-            table.add_column(col_name, justify="right", no_wrap=False, overflow="fold")
-            additional_currency_columns.append(curr)
+    additional_currency_columns = [curr for curr in conversion_rates if curr != "USD"]
+    for curr in additional_currency_columns:
+        table.add_column(f"Стоимость ({curr})", justify="right", no_wrap=False, overflow="fold")
 
     totals = {curr: 0.0 for curr in conversion_rates}
 
     for asset in assets:
         data = client._send_request('GET', '/api/v3/ticker/price', params={'symbol': asset.symbol})
-        try:
-            price_usd = float(data.get("price", 0))
-        except Exception:
-            price_usd = 0.0
+        price_usd = float(data.get("price", 0)) if "price" in data else 0.0
         value_usd = asset.amount * price_usd
         totals["USD"] += value_usd
 
@@ -225,13 +235,7 @@ def view_portfolio():
             *cost_values
         )
 
-    total_row = [
-        "[bold]Итого[/bold]",
-        "",
-        "",
-        "",
-        f"[bold]USD: {totals['USD']:,.2f} {currency_symbols['USD']}[/bold]"
-    ]
+    total_row = ["[bold]Итого[/bold]", "", "", "", f"[bold]USD: {totals['USD']:,.2f} {currency_symbols['USD']}[/bold]"]
     for curr in additional_currency_columns:
         total_row.append(f"[bold]{curr}: {totals[curr]:,.2f} {currency_symbols.get(curr, curr)}[/bold]")
     table.add_row(*total_row)
@@ -240,7 +244,7 @@ def view_portfolio():
     session.close()
 
 
-def add_asset():
+def add_asset(manager: PortfolioManager):
     session = Session()
     symbol = input("Введите символ актива (например, BTCUSDT): ").strip().upper()
     name = input("Введите название актива: ").strip()
@@ -250,24 +254,25 @@ def add_asset():
         console.print("[red]Неверное значение количества.[/red]")
         session.close()
         return
-    asset = session.query(Asset).filter_by(symbol=symbol).first()
+    portfolio_id = manager.get_current_portfolio_id()
+    asset = session.query(Asset).filter_by(symbol=symbol, portfolio_id=portfolio_id).first()
     if asset:
-        console.print(
-            f"[yellow]Актив {symbol} уже существует. Для изменения количества воспользуйтесь обновлением.[/yellow]")
+        console.print(f"[yellow]Актив {symbol} уже существует в портфеле '{manager.current_portfolio.name}'.[/yellow]")
     else:
-        new_asset = Asset(symbol=symbol, name=name, amount=amount)
+        new_asset = Asset(symbol=symbol, name=name, amount=amount, portfolio_id=portfolio_id)
         session.add(new_asset)
         session.commit()
-        console.print(f"[green]Актив {symbol} успешно добавлен в портфель.[/green]")
+        console.print(f"[green]Актив {symbol} добавлен в портфель '{manager.current_portfolio.name}'.[/green]")
     session.close()
 
 
-def update_asset():
+def update_asset(manager: PortfolioManager):
     session = Session()
     symbol = input("Введите символ актива для обновления: ").strip().upper()
-    asset = session.query(Asset).filter_by(symbol=symbol).first()
+    portfolio_id = manager.get_current_portfolio_id()
+    asset = session.query(Asset).filter_by(symbol=symbol, portfolio_id=portfolio_id).first()
     if not asset:
-        console.print(f"[red]Актив {symbol} не найден в портфеле.[/red]")
+        console.print(f"[red]Актив {symbol} не найден в портфеле '{manager.current_portfolio.name}'.[/red]")
         session.close()
         return
     try:
@@ -278,21 +283,22 @@ def update_asset():
         return
     asset.amount = new_amount
     session.commit()
-    console.print(f"[green]Актив {symbol} успешно обновлён.[/green]")
+    console.print(f"[green]Актив {symbol} успешно обновлён в портфеле '{manager.current_portfolio.name}'.[/green]")
     session.close()
 
 
-def remove_asset():
+def remove_asset(manager: PortfolioManager):
     session = Session()
     symbol = input("Введите символ актива для удаления: ").strip().upper()
-    asset = session.query(Asset).filter_by(symbol=symbol).first()
+    portfolio_id = manager.get_current_portfolio_id()
+    asset = session.query(Asset).filter_by(symbol=symbol, portfolio_id=portfolio_id).first()
     if not asset:
-        console.print(f"[red]Актив {symbol} не найден в портфеле.[/red]")
+        console.print(f"[red]Актив {symbol} не найден в портфеле '{manager.current_portfolio.name}'.[/red]")
         session.close()
         return
     session.delete(asset)
     session.commit()
-    console.print(f"[green]Актив {symbol} успешно удалён из портфеля.[/green]")
+    console.print(f"[green]Актив {symbol} удалён из портфеля '{manager.current_portfolio.name}'.[/green]")
     session.close()
 
 
@@ -383,10 +389,10 @@ def edit_asset_names():
         console.print("[red]Неверный выбор.[/red]")
 
 
-def interactive_portfolio_management():
+def interactive_portfolio_management(manager: PortfolioManager):
     while True:
         try:
-            console.print("\n[bold blue]Портфельное управление:[/bold blue]")
+            console.print(f"\n[bold blue]Управление портфелем: {manager.current_portfolio.name}[/bold blue]")
             console.print("[cyan]1.[/cyan] Просмотр портфеля с информацией о стоимости")
             console.print("[cyan]2.[/cyan] Добавить актив")
             console.print("[cyan]3.[/cyan] Обновить актив")
@@ -397,16 +403,17 @@ def interactive_portfolio_management():
             console.print("[cyan]8.[/cyan] Просмотр всех курсов обмена")
             console.print("[cyan]9.[/cyan] Редактировать список названий активов")
             console.print("[cyan]10.[/cyan] Визуализировать историю изменения цены для символа")
-            console.print("[cyan]11.[/cyan] Выход")
+            console.print("[cyan]11.[/cyan] Сменить портфель")
+            console.print("[cyan]12.[/cyan] Выход")
             choice = input("Выберите опцию: ").strip()
             if choice == "1":
-                view_portfolio()
+                view_portfolio(manager)
             elif choice == "2":
-                add_asset()
+                add_asset(manager)
             elif choice == "3":
-                update_asset()
+                update_asset(manager)
             elif choice == "4":
-                remove_asset()
+                remove_asset(manager)
             elif choice == "5":
                 view_all_exchange_assets()
             elif choice == "6":
@@ -418,9 +425,11 @@ def interactive_portfolio_management():
             elif choice == "9":
                 edit_asset_names()
             elif choice == "10":
-                symbol = input("Введите символ актива для визуализации (например, BTCUSDT): ").strip().upper()
+                symbol = input("Введите символ актива для визуализации: ").strip().upper()
                 plot_symbol_history(symbol)
             elif choice == "11":
+                manager.select_portfolio()
+            elif choice == "12":
                 console.print("[bold green]Выход из управления портфелем.[/bold green]")
                 break
             else:
@@ -431,16 +440,20 @@ def interactive_portfolio_management():
 
 
 def main():
+    manager = PortfolioManager()
+    manager.select_portfolio()  # Выбор портфеля при запуске
+
     symbol = 'BTCUSDT'
     interval = '1h'
-
     fetch_and_store_klines(symbol, interval, limit=100)
     analysis = analyze_klines(symbol)
     if analysis:
         console.print("[bold blue]Результаты анализа:[/bold blue]")
         display_analysis(analysis)
         export_analysis(analysis, 'analysis_report.csv')
-    interactive_portfolio_management()
+
+    interactive_portfolio_management(manager)
+    manager.close()
 
 
 if __name__ == '__main__':
@@ -448,4 +461,3 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         console.print("\n[bold red]Программа прервана пользователем. Выход...[/bold red]")
-
